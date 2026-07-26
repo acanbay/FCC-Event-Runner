@@ -7,13 +7,52 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import sys
 from pathlib import Path
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_DIR / "runner"))
+KEY4HEP_SETUP = Path(
+    os.environ.get(
+        "FCC_KEY4HEP_SETUP",
+        "/cvmfs/sw.hsf.org/key4hep/setup.sh",
+    )
+)
 
+
+def load_key4hep_if_needed() -> None:
+    required = ("mg5_aMC", "DelphesPythia8_EDM4HEP", "podio-dump")
+    if all(shutil.which(command) for command in required):
+        return
+
+    if os.environ.get("FCC_EVENT_RUNNER_BOOTSTRAPPED") == "1":
+        raise RuntimeError(
+            "Key4hep was loaded, but the required commands are unavailable."
+        )
+    if not KEY4HEP_SETUP.is_file():
+        raise RuntimeError(
+            f"Key4hep setup was not found: {KEY4HEP_SETUP}"
+        )
+
+    os.environ["FCC_EVENT_RUNNER_BOOTSTRAPPED"] = "1"
+    os.execv(
+        "/bin/bash",
+        [
+            "bash",
+            "-c",
+            'set +u; source "$1"; shift; exec python3 "$@"',
+            "fcc-run",
+            str(KEY4HEP_SETUP),
+            str(Path(__file__).resolve()),
+            *sys.argv[1:],
+        ],
+    )
+
+
+load_key4hep_if_needed()
+sys.path.insert(0, str(PROJECT_DIR / "runner"))
 from workflow import WorkflowOptions, run_fcc_workflow  # noqa: E402
 
 

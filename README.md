@@ -11,10 +11,9 @@ installation or Python package is required.
 
 ## Quick start
 
-Load Key4hep:
+Make the launcher executable once:
 
 ```bash
-source /cvmfs/sw.hsf.org/key4hep/setup.sh -r 2026-04-08
 chmod +x bin/fcc-run
 ```
 
@@ -23,6 +22,10 @@ Run the complete ttbar example:
 ```bash
 ./bin/fcc-run examples/ttbar/config.yaml
 ```
+
+If the Key4hep commands are not already available, `fcc-run` loads
+`/cvmfs/sw.hsf.org/key4hep/setup.sh` automatically. CVMFS must be mounted, but
+the user does not need to source Key4hep manually.
 
 Run with a persistent writable LHAPDF cache:
 

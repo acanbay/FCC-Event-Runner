@@ -120,18 +120,6 @@ def render_template(path: Path, replacements: dict[str, Any]) -> str:
     return content
 
 
-def patch_delphes_seed(path: Path, seed: int) -> str:
-    content = path.read_text(encoding="utf-8")
-    replacement = f"set RandomSeed {seed}"
-    content, count = re.subn(
-        r"(?m)^\s*set\s+RandomSeed\s+\S+\s*$",
-        replacement,
-        content,
-        count=1,
-    )
-    return content if count else f"{replacement}\n{content}"
-
-
 def parse_lhe(path: Path) -> dict[str, Any]:
     events = 0
     init_lines: list[str] = []

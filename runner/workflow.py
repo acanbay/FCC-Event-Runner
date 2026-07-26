@@ -21,16 +21,7 @@ from parsers import (
     parse_lhe,
     parse_madgraph_card,
     parse_podio_event_count,
-    patch_delphes_seed,
     render_template,
-)
-
-
-# Compatibility path required by MadGraph helpers in Key4hep 2026-04-08.
-KEY4HEP_YAML_CPP = Path(
-    "/cvmfs/sw.hsf.org/key4hep/releases/2026-02-01/"
-    "x86_64-almalinux9-gcc14.2.0-opt/"
-    "yaml-cpp/0.8.0-v762up/lib64"
 )
 
 
@@ -71,13 +62,7 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
     }
 
     environment = dict(os.environ)
-    if KEY4HEP_YAML_CPP.is_dir():
-        old_path = environment.get("LD_LIBRARY_PATH", "")
-        environment["LD_LIBRARY_PATH"] = (
-            f"{KEY4HEP_YAML_CPP}{os.pathsep}{old_path}"
-            if old_path
-            else str(KEY4HEP_YAML_CPP)
-        )
+    add_yaml_cpp_runtime(environment)
 
     pdf = prepare_lhapdf(
         mg["lhaid"],
@@ -158,17 +143,11 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
             encoding="utf-8",
         )
 
-        delphes_runtime = log_dir / "delphes_runtime.tcl"
-        delphes_runtime.write_text(
-            patch_delphes_seed(cards["delphes"], seeds["delphes"]),
-            encoding="utf-8",
-        )
-
         print("\n[2/3] Running Pythia8 and Delphes...")
         run_command(
             [
                 commands["DelphesPythia8_EDM4HEP"],
-                str(delphes_runtime),
+                str(cards["delphes"]),
                 str(cards["edm4hep"]),
                 str(pythia_runtime),
                 str(temporary_root),
@@ -247,6 +226,28 @@ def require_command(name: str) -> str:
             f"'{name}' was not found. Load Key4hep before running."
         )
     return command
+
+
+def add_yaml_cpp_runtime(environment: dict[str, str]) -> None:
+    """Expose yaml-cpp from the active Key4hep environment to MG5 helpers."""
+
+    prefixes = environment.get("CMAKE_PREFIX_PATH", "").split(os.pathsep)
+    for prefix in prefixes:
+        if "yaml-cpp" not in prefix:
+            continue
+
+        for name in ("lib64", "lib"):
+            directory = Path(prefix) / name
+            if directory.is_dir() and any(
+                directory.glob("libyaml-cpp.so*")
+            ):
+                current = environment.get("LD_LIBRARY_PATH", "")
+                environment["LD_LIBRARY_PATH"] = (
+                    f"{directory}{os.pathsep}{current}"
+                    if current
+                    else str(directory)
+                )
+                return
 
 
 def print_summary(
@@ -349,7 +350,6 @@ def runtime_seeds(madgraph_seed: int | None) -> dict[str, int | None]:
     return {
         "madgraph": madgraph_seed,
         "pythia": base + 1,
-        "delphes": base + 2,
     }
 
 
