@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+outputs/
+logs/
+work/
+
+*.root
+*.lhe
+*.lhe.gz

@@ -1,0 +1,4 @@
+madgraph_card: wjets.mg5
+pythia_card: wjets_pythia.cmd
+delphes_card: ${DELPHES_DIR}/cards/FCC/scenarios/FCChh_II.tcl
+edm4hep_card: ${K4SIMDELPHES}/edm4hep_output_config.tcl

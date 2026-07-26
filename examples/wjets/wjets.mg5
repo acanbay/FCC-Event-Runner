@@ -1,0 +1,41 @@
+import model sm
+
+define p = g u c d s u~ c~ d~ s~
+define j = p
+
+generate p p > w+ @0
+add process p p > w- @1
+
+add process p p > w+ j @2
+add process p p > w- j @3
+
+add process p p > w+ j j @4
+add process p p > w- j j @5
+
+output work/wjets
+launch work/wjets
+
+shower=OFF
+detector=OFF
+analysis=OFF
+madspin=OFF
+reweight=OFF
+
+done
+
+set nevents 100
+set iseed 23456
+
+set ebeam1 50000
+set ebeam2 50000
+
+set pdlabel lhapdf
+set lhaid 263000
+
+set ickkw 1
+set xqcut 30.0
+set maxjetflavor 4
+set alpsfact 1.0
+set auto_ptj_mjj T
+
+done
