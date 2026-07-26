@@ -161,12 +161,6 @@ loads its environment and calls:
 /path/to/FCC-Event-Runner/bin/fcc-run config.yaml
 ```
 
-## Author
-
-Ali Can Canbay  
-Ankara University  
-acanbay@ankara.edu.tr
-
 ## References
 
 - [FCC Software](https://hep-fcc.github.io/FCCSW/)
