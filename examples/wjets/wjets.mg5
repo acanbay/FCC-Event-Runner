@@ -24,7 +24,7 @@ reweight=OFF
 done
 
 set nevents 100
-set iseed 44
+set iseed 23456
 
 set ebeam1 50000
 set ebeam2 50000

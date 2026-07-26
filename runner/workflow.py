@@ -1,4 +1,4 @@
-"""Readable FCC event-production workflow."""
+"""MadGraph5 -> Pythia8 -> Delphes -> EDM4hep workflow."""
 
 from __future__ import annotations
 
@@ -9,13 +9,12 @@ import secrets
 import shutil
 import subprocess
 import sys
-import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lhapdf import inspect_lhapdf, prepare_lhapdf
+from lhapdf import prepare_lhapdf
 from parsers import (
     load_manifest,
     matching_description,
@@ -24,6 +23,14 @@ from parsers import (
     parse_podio_event_count,
     patch_delphes_seed,
     render_template,
+)
+
+
+# Compatibility path required by MadGraph helpers in Key4hep 2026-04-08.
+KEY4HEP_YAML_CPP = Path(
+    "/cvmfs/sw.hsf.org/key4hep/releases/2026-02-01/"
+    "x86_64-almalinux9-gcc14.2.0-opt/"
+    "yaml-cpp/0.8.0-v762up/lib64"
 )
 
 
@@ -40,518 +47,248 @@ class WorkflowOptions:
 
 
 def run_fcc_workflow(options: WorkflowOptions) -> int:
-    """Run the complete MG5 -> Pythia8 -> Delphes -> EDM4hep workflow."""
-
-    # 1. Load the manifest and resolve the input cards.
     config_file = options.config_file.expanduser().resolve()
-    require_file(config_file, "Production configuration")
+    if not config_file.is_file():
+        raise RuntimeError(f"Configuration was not found: {config_file}")
 
-    config_directory = config_file.parent
+    base = config_file.parent
     manifest = load_manifest(config_file)
-    cards = resolve_cards(manifest, config_directory)
+    cards = {
+        name: resolve_card(manifest[f"{name}_card"], base)
+        for name in ("madgraph", "pythia", "delphes", "edm4hep")
+    }
+    mg = parse_madgraph_card(cards["madgraph"])
 
-    # 2. Read the production definition from the single MadGraph card.
-    madgraph_information = parse_madgraph_card(cards["madgraph"])
+    process_dir = (base / mg["output_directory"]).resolve()
+    output_dir = base / "outputs"
+    root_file = output_dir / f"{mg['sample_name']}.root"
+    metadata_file = output_dir / f"{mg['sample_name']}.metadata.json"
+    lhe_output = output_dir / f"{mg['sample_name']}.lhe.gz"
 
-    layout = build_output_layout(
-        config_directory,
-        madgraph_information["output_directory"],
-        madgraph_information["sample_name"],
-    )
-
-    # 3. Check the Key4hep commands required by the workflow.
-    executables = {
-        "mg5_aMC": require_executable("mg5_aMC"),
-        "DelphesPythia8_EDM4HEP": require_executable(
-            "DelphesPythia8_EDM4HEP"
-        ),
-        "podio-dump": require_executable("podio-dump"),
+    commands = {
+        name: require_command(name)
+        for name in ("mg5_aMC", "DelphesPythia8_EDM4HEP", "podio-dump")
     }
 
     environment = dict(os.environ)
+    if KEY4HEP_YAML_CPP.is_dir():
+        old_path = environment.get("LD_LIBRARY_PATH", "")
+        environment["LD_LIBRARY_PATH"] = (
+            f"{KEY4HEP_YAML_CPP}{os.pathsep}{old_path}"
+            if old_path
+            else str(KEY4HEP_YAML_CPP)
+        )
 
-    # 4. Inspect the PDF without modifying the environment.
-    pdf_information = inspect_lhapdf(
-        madgraph_information["lhaid"],
+    pdf = prepare_lhapdf(
+        mg["lhaid"],
         options.lhapdf_directory,
         environment,
+        install=False,
     )
-
-    # 5. Show the resolved production before taking any action.
-    print_production_summary(
-        cards=cards,
-        madgraph_information=madgraph_information,
-        pdf_information=pdf_information,
-        root_file=layout["root_file"],
-    )
+    print_summary(cards, mg, pdf, root_file)
 
     if options.dry_run:
         print("\nDry run completed. No files were generated.")
         return 0
 
-    request_confirmation(options.confirm)
+    if options.confirm:
+        if not sys.stdin.isatty():
+            raise RuntimeError("--confirm requires an interactive terminal.")
+        input("\nPress Enter to start or Ctrl+C to cancel: ")
 
-    # 6. Prepare the writable LHAPDF environment when needed.
-    pdf_information = prepare_lhapdf(
-        madgraph_information["lhaid"],
+    pdf = prepare_lhapdf(
+        mg["lhaid"],
         options.lhapdf_directory,
         environment,
         install=True,
     )
-
     if options.prepare:
-        if pdf_information is None:
-            print("\nEnvironment preparation completed. No PDF was requested.")
-        else:
-            print(
-                "\nEnvironment preparation completed: "
-                f"{pdf_information['name']}"
-            )
-
+        name = pdf["name"] if pdf else "No PDF requested"
+        print(f"\nEnvironment preparation completed: {name}")
         return 0
-
-    # 7. Protect existing outputs and previous MadGraph work.
-    protect_existing_paths(layout, options)
-    print("\nStarting event generation...")
-
-    # 8. Run the complete MadGraph card.
-    run_id = create_run_id()
-    log_directory = layout["log_base"] / run_id
-    log_directory.mkdir(parents=True)
-
-    shutil.copy2(config_file, log_directory / "config.yaml")
-    shutil.copy2(
-        cards["madgraph"],
-        log_directory / cards["madgraph"].name,
-    )
-
-    success = False
-    temporary_root = (
-        layout["output_directory"]
-        / f".{layout['sample_name']}.{run_id}.tmp.root"
-    )
-
-    try:
-        print("\n[1/3] Running MadGraph5...")
-
-        run_logged_command(
-            command=[
-                executables["mg5_aMC"],
-                str(cards["madgraph"]),
-            ],
-            log_file=log_directory / "madgraph.log",
-            working_directory=config_directory,
-            environment=environment,
-        )
-
-        # 9. Locate and inspect the LHE generated by MadGraph.
-        lhe_source = locate_lhe(layout["process_directory"])
-        lhe_file = (
-            layout["process_directory"]
-            / "Events"
-            / "fcc_runner_events.lhe"
-        )
-
-        unpack_lhe(
-            source=lhe_source,
-            destination=lhe_file,
-        )
-
-        lhe_information = parse_lhe(lhe_file)
-
-        if lhe_information["events"] <= 0:
-            raise RuntimeError(
-                f"The generated LHE file contains no events: {lhe_file}"
-            )
-
-        # 10. Prepare the Pythia and Delphes runtime cards.
-        seeds = create_runtime_seeds(madgraph_information["iseed"])
-
-        pythia_content = render_template(
-            cards["pythia"],
-            {
-                "LHE_FILE": lhe_file,
-                "LHE_EVENTS": lhe_information["events"],
-                "PYTHIA_SEED": seeds["pythia"],
-            },
-        )
-
-        runtime_pythia_card = log_directory / cards["pythia"].name
-        runtime_pythia_card.write_text(
-            pythia_content,
-            encoding="utf-8",
-        )
-
-        delphes_content = patch_delphes_seed(
-            cards["delphes"],
-            seeds["delphes"],
-        )
-
-        runtime_delphes_card = log_directory / "delphes_runtime.tcl"
-        runtime_delphes_card.write_text(
-            delphes_content,
-            encoding="utf-8",
-        )
-
-        # 11. Run Pythia8 and Delphes through the Key4hep executable.
-        print("\n[2/3] Running Pythia8 and Delphes...")
-
-        layout["output_directory"].mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        run_logged_command(
-            command=[
-                executables["DelphesPythia8_EDM4HEP"],
-                str(runtime_delphes_card),
-                str(cards["edm4hep"]),
-                str(runtime_pythia_card),
-                str(temporary_root),
-            ],
-            log_file=log_directory / "pythia_delphes.log",
-            working_directory=config_directory,
-            environment=environment,
-        )
-
-        # 12. Validate the EDM4hep output.
-        print("\n[3/3] Validating the EDM4hep output...")
-
-        output_events = validate_edm4hep_output(
-            root_file=temporary_root,
-            podio_dump=executables["podio-dump"],
-            log_file=log_directory / "validation.log",
-            environment=environment,
-        )
-
-        if output_events <= 0:
-            raise RuntimeError("The EDM4hep output contains no events.")
-
-        # 13. Preserve the generated production cards and metadata.
-        preserve_madgraph_metadata(
-            process_directory=layout["process_directory"],
-            lhe_source=lhe_source,
-            log_directory=log_directory,
-        )
-
-        if options.keep_lhe:
-            save_lhe_output(
-                lhe_file=lhe_file,
-                output_file=layout["lhe_file"],
-            )
-
-        metadata = build_metadata(
-            run_id=run_id,
-            cards=cards,
-            executables=executables,
-            madgraph_information=madgraph_information,
-            lhe_information=lhe_information,
-            output_events=output_events,
-            pdf_information=pdf_information,
-            seeds=seeds,
-            root_file=layout["root_file"],
-            log_directory=log_directory,
-        )
-
-        # 14. Replace the final output only after successful validation.
-        os.replace(temporary_root, layout["root_file"])
-
-        layout["metadata_file"].write_text(
-            json.dumps(
-                metadata,
-                indent=2,
-                ensure_ascii=False,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-        success = True
-
-        print("\nProduction completed successfully.")
-        print(f"EDM4hep output : {layout['root_file']}")
-        print(f"Metadata       : {layout['metadata_file']}")
-        print(f"Logs           : {log_directory}")
-
-        return 0
-
-    finally:
-        temporary_root.unlink(missing_ok=True)
-
-        if success and not options.keep_work:
-            remove_process_directory(
-                layout["process_directory"],
-                config_directory,
-            )
-
-        if not success and layout["process_directory"].exists():
-            print(
-                "\nThe failed MadGraph process directory was preserved:",
-                file=sys.stderr,
-            )
-            print(
-                f"  {layout['process_directory']}",
-                file=sys.stderr,
-            )
-
-
-def resolve_cards(
-    manifest: dict[str, str],
-    config_directory: Path,
-) -> dict[str, Path]:
-    cards = {
-        "madgraph": resolve_path(
-            manifest["madgraph_card"],
-            config_directory,
-        ),
-        "pythia": resolve_path(
-            manifest["pythia_card"],
-            config_directory,
-        ),
-        "delphes": resolve_path(
-            manifest["delphes_card"],
-            config_directory,
-        ),
-        "edm4hep": resolve_path(
-            manifest["edm4hep_card"],
-            config_directory,
-        ),
-    }
-
-    for name, path in cards.items():
-        require_file(path, f"{name} card")
-
-    return cards
-
-
-def resolve_path(
-    value: str,
-    base_directory: Path,
-) -> Path:
-    expanded = os.path.expandvars(os.path.expanduser(value))
-    path = Path(expanded)
-
-    if not path.is_absolute():
-        path = base_directory / path
-
-    return path.resolve()
-
-
-def build_output_layout(
-    config_directory: Path,
-    madgraph_output: str,
-    sample_name: str,
-) -> dict[str, Any]:
-    process_directory = (
-        config_directory
-        / madgraph_output
-    ).resolve()
-
-    try:
-        relative_process = process_directory.relative_to(
-            config_directory
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            "The MadGraph output must remain inside the configuration directory."
-        ) from error
-
-    if not relative_process.parts:
-        raise RuntimeError(
-            "The MadGraph output cannot be the configuration directory."
-        )
-
-    output_directory = (
-        config_directory
-        / "outputs"
-    ).resolve()
-
-    return {
-        "sample_name": sample_name,
-        "process_directory": process_directory,
-        "output_directory": output_directory,
-        "root_file": output_directory / f"{sample_name}.root",
-        "metadata_file": (
-            output_directory
-            / f"{sample_name}.metadata.json"
-        ),
-        "lhe_file": output_directory / f"{sample_name}.lhe.gz",
-        "log_base": (
-            config_directory
-            / "logs"
-            / sample_name
-        ).resolve(),
-    }
-
-
-def require_file(
-    path: Path,
-    description: str,
-) -> None:
-    if not path.is_file():
-        raise RuntimeError(f"{description} was not found: {path}")
-
-
-def require_executable(name: str) -> str:
-    executable = shutil.which(name)
-
-    if executable is None:
-        raise RuntimeError(
-            f"'{name}' was not found. "
-            "Load the Key4hep environment before running FCC Event Runner."
-        )
-
-    return str(Path(executable).resolve())
-
-
-def print_production_summary(
-    cards: dict[str, Path],
-    madgraph_information: dict[str, Any],
-    pdf_information: dict[str, Any] | None,
-    root_file: Path,
-) -> None:
-    if pdf_information is None:
-        pdf_value = "Not requested"
-    elif pdf_information["name"]:
-        status = (
-            "installed"
-            if pdf_information["installed"]
-            else "not installed"
-        )
-        pdf_value = (
-            f"{pdf_information['lhaid']} "
-            f"({pdf_information['name']}, {status})"
-        )
-    else:
-        pdf_value = str(pdf_information["lhaid"])
-
-    rows = [
-        ("MadGraph card", str(cards["madgraph"])),
-        ("Pythia card", str(cards["pythia"])),
-        ("Delphes card", str(cards["delphes"])),
-        (
-            "MG5 output",
-            madgraph_information["output_directory"],
-        ),
-        (
-            "Events",
-            display_value(madgraph_information["nevents"]),
-        ),
-        (
-            "Beam 1 energy",
-            display_energy(madgraph_information["ebeam1"]),
-        ),
-        (
-            "Beam 2 energy",
-            display_energy(madgraph_information["ebeam2"]),
-        ),
-        ("LHAPDF", pdf_value),
-        (
-            "Jet matching",
-            matching_description(madgraph_information),
-        ),
-        ("Final output", str(root_file)),
-    ]
-
-    print_table(rows)
-
-
-def print_table(rows: list[tuple[str, str]]) -> None:
-    label_width = max(
-        len("Production setting"),
-        *(len(label) for label, _ in rows),
-    )
-    value_width = 68
-
-    border = (
-        "+"
-        + "-" * (label_width + 2)
-        + "+"
-        + "-" * (value_width + 2)
-        + "+"
-    )
-
-    print(border)
-    print(
-        f"| {'Production setting':<{label_width}} "
-        f"| {'Value':<{value_width}} |"
-    )
-    print(border)
-
-    for label, value in rows:
-        wrapped_lines = textwrap.wrap(
-            str(value),
-            width=value_width,
-            break_long_words=True,
-            break_on_hyphens=False,
-        ) or [""]
-
-        for line_number, line in enumerate(wrapped_lines):
-            displayed_label = label if line_number == 0 else ""
-
-            print(
-                f"| {displayed_label:<{label_width}} "
-                f"| {line:<{value_width}} |"
-            )
-
-    print(border)
-
-
-def display_value(value: Any) -> str:
-    return "Not specified" if value is None else str(value)
-
-
-def display_energy(value: float | None) -> str:
-    if value is None:
-        return "Not specified"
-
-    return f"{value:g} GeV"
-
-
-def request_confirmation(confirm: bool) -> None:
-    if not confirm:
-        return
-
-    if not sys.stdin.isatty():
-        raise RuntimeError(
-            "--confirm requires an interactive terminal."
-        )
-
-    input("\nPress Enter to start or Ctrl+C to cancel: ")
-
-
-def protect_existing_paths(
-    layout: dict[str, Any],
-    options: WorkflowOptions,
-) -> None:
-    root_file = layout["root_file"]
-    process_directory = layout["process_directory"]
 
     if root_file.exists() and not options.overwrite:
         raise RuntimeError(
             f"Output already exists: {root_file}\n"
             "Use --overwrite to replace it after successful validation."
         )
-
-    if process_directory.exists():
+    if process_dir.exists():
         raise RuntimeError(
-            f"MadGraph output directory already exists: {process_directory}\n"
-            "Remove or move it before starting a new production."
+            f"MadGraph output directory already exists: {process_dir}"
         )
 
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    log_dir = base / "logs" / mg["sample_name"] / run_id
+    log_dir.mkdir(parents=True)
+    shutil.copy2(config_file, log_dir / "config.yaml")
+    for name in ("madgraph", "pythia"):
+        shutil.copy2(cards[name], log_dir / cards[name].name)
 
-def run_logged_command(
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary_root = output_dir / f".{mg['sample_name']}.{run_id}.root"
+    success = False
+
+    try:
+        print("\n[1/3] Running MadGraph5...")
+        run_command(
+            [commands["mg5_aMC"], str(cards["madgraph"])],
+            log_dir / "madgraph.log",
+            base,
+            environment,
+        )
+
+        lhe_source = find_lhe(process_dir)
+        lhe_file = process_dir / "Events" / "fcc_runner_events.lhe"
+        unpack_lhe(lhe_source, lhe_file)
+        lhe = parse_lhe(lhe_file)
+        if lhe["events"] < 1:
+            raise RuntimeError(f"The LHE file contains no events: {lhe_file}")
+
+        seeds = runtime_seeds(mg["iseed"])
+        pythia_runtime = log_dir / "pythia_runtime.cmd"
+        pythia_runtime.write_text(
+            render_template(
+                cards["pythia"],
+                {
+                    "LHE_FILE": lhe_file,
+                    "LHE_EVENTS": lhe["events"],
+                    "PYTHIA_SEED": seeds["pythia"],
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        delphes_runtime = log_dir / "delphes_runtime.tcl"
+        delphes_runtime.write_text(
+            patch_delphes_seed(cards["delphes"], seeds["delphes"]),
+            encoding="utf-8",
+        )
+
+        print("\n[2/3] Running Pythia8 and Delphes...")
+        run_command(
+            [
+                commands["DelphesPythia8_EDM4HEP"],
+                str(delphes_runtime),
+                str(cards["edm4hep"]),
+                str(pythia_runtime),
+                str(temporary_root),
+            ],
+            log_dir / "pythia_delphes.log",
+            base,
+            environment,
+        )
+
+        print("\n[3/3] Validating the EDM4hep output...")
+        output_events = validate_output(
+            temporary_root,
+            commands["podio-dump"],
+            log_dir / "validation.log",
+            environment,
+        )
+
+        copy_madgraph_cards(process_dir, lhe_source.parent, log_dir)
+        if options.keep_lhe:
+            save_lhe(lhe_file, lhe_output)
+
+        metadata = {
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "sample": mg["sample_name"],
+            "requested_events": mg["nevents"],
+            "lhe_events": lhe["events"],
+            "edm4hep_events": output_events,
+            "cross_section_pb": lhe["cross_section_pb"],
+            "cross_section_error_pb": lhe["cross_section_error_pb"],
+            "beam1_energy_gev": mg["ebeam1"],
+            "beam2_energy_gev": mg["ebeam2"],
+            "lhaid": mg["lhaid"],
+            "matching": matching_description(mg),
+            "seeds": seeds,
+            "cards": {name: str(path) for name, path in cards.items()},
+            "executables": commands,
+        }
+
+        os.replace(temporary_root, root_file)
+        metadata_file.write_text(
+            json.dumps(metadata, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        success = True
+
+        print("\nProduction completed successfully.")
+        print(f"EDM4hep output : {root_file}")
+        print(f"Metadata       : {metadata_file}")
+        print(f"Logs           : {log_dir}")
+        return 0
+
+    finally:
+        temporary_root.unlink(missing_ok=True)
+        if success and not options.keep_work:
+            shutil.rmtree(process_dir)
+        elif not success and process_dir.exists():
+            print(
+                f"\nFailed MadGraph directory preserved:\n  {process_dir}",
+                file=sys.stderr,
+            )
+
+
+def resolve_card(value: str, base: Path) -> Path:
+    path = Path(os.path.expandvars(os.path.expanduser(value)))
+    path = path if path.is_absolute() else base / path
+    path = path.resolve()
+    if not path.is_file():
+        raise RuntimeError(f"Card was not found: {path}")
+    return path
+
+
+def require_command(name: str) -> str:
+    command = shutil.which(name)
+    if command is None:
+        raise RuntimeError(
+            f"'{name}' was not found. Load Key4hep before running."
+        )
+    return command
+
+
+def print_summary(
+    cards: dict[str, Path],
+    mg: dict[str, Any],
+    pdf: dict[str, Any] | None,
+    root_file: Path,
+) -> None:
+    if pdf is None:
+        pdf_text = "Not requested"
+    elif pdf["name"]:
+        status = "installed" if pdf["installed"] else "not installed"
+        pdf_text = f"{pdf['lhaid']} ({pdf['name']}, {status})"
+    else:
+        pdf_text = str(pdf["lhaid"])
+
+    rows = [
+        ("MadGraph card", cards["madgraph"]),
+        ("Pythia card", cards["pythia"]),
+        ("Delphes card", cards["delphes"]),
+        ("MG5 output", mg["output_directory"]),
+        ("Events", mg["nevents"]),
+        ("Beam energies", f"{mg['ebeam1']} + {mg['ebeam2']} GeV"),
+        ("LHAPDF", pdf_text),
+        ("Jet matching", matching_description(mg)),
+        ("Final output", root_file),
+    ]
+    width = max(len(label) for label, _ in rows)
+
+    print("Production summary")
+    print("-" * (width + 2))
+    for label, value in rows:
+        print(f"{label:<{width}} : {value}")
+
+
+def run_command(
     command: list[str],
     log_file: Path,
     working_directory: Path,
     environment: dict[str, str],
 ) -> None:
-    print(f"Running: {' '.join(command)}")
-
-    with log_file.open(
-        "w",
-        encoding="utf-8",
-    ) as log:
+    with log_file.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
             command,
             cwd=working_directory,
@@ -561,13 +298,10 @@ def run_logged_command(
             text=True,
             bufsize=1,
         )
-
         assert process.stdout is not None
-
         for line in process.stdout:
             print(line, end="")
             log.write(line)
-
         return_code = process.wait()
 
     if return_code != 0:
@@ -576,109 +310,57 @@ def run_logged_command(
         )
 
 
-def locate_lhe(
-    process_directory: Path,
-) -> Path:
-    events_directory = process_directory / "Events"
-
-    if not events_directory.is_dir():
-        raise RuntimeError(
-            f"MadGraph Events directory was not found: {events_directory}"
-        )
-
-    names = [
+def find_lhe(process_dir: Path) -> Path:
+    events_dir = process_dir / "Events"
+    names = {
         "unweighted_events.lhe.gz",
         "unweighted_events.lhe",
         "events.lhe.gz",
         "events.lhe",
-    ]
+    }
+    files = [
+        path
+        for path in events_dir.rglob("*")
+        if path.is_file() and path.name in names
+    ] if events_dir.is_dir() else []
 
-    found: list[Path] = []
-
-    for run_directory in events_directory.iterdir():
-        if not run_directory.is_dir():
-            continue
-
-        for name in names:
-            candidate = run_directory / name
-
-            if candidate.is_file():
-                found.append(candidate)
-                break
-
-    if not found:
+    if len(files) != 1:
         raise RuntimeError(
-            f"No LHE output was found in {events_directory}."
+            f"Expected one LHE output in {events_dir}; found {len(files)}."
         )
-
-    if len(found) > 1:
-        locations = "\n".join(
-            f"  {path}"
-            for path in found
-        )
-
-        raise RuntimeError(
-            "More than one LHE output was produced. "
-            "FCC Event Runner expects one event sample per run:\n"
-            f"{locations}"
-        )
-
-    return found[0]
+    return files[0]
 
 
-def unpack_lhe(
-    source: Path,
-    destination: Path,
-) -> None:
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
+def unpack_lhe(source: Path, destination: Path) -> None:
     if source.suffix == ".gz":
-        with gzip.open(source, "rb") as compressed:
-            with destination.open("wb") as uncompressed:
-                shutil.copyfileobj(
-                    compressed,
-                    uncompressed,
-                )
+        with gzip.open(source, "rb") as input_file:
+            with destination.open("wb") as output_file:
+                shutil.copyfileobj(input_file, output_file)
     else:
         shutil.copy2(source, destination)
 
 
-def create_runtime_seeds(
-    madgraph_seed: int | None,
-) -> dict[str, int | None]:
-    if (
-        madgraph_seed is not None
-        and 1 <= madgraph_seed <= 899_999_997
-    ):
-        base_seed = madgraph_seed
-    else:
-        base_seed = secrets.randbelow(
-            899_999_997
-        ) + 1
-
+def runtime_seeds(madgraph_seed: int | None) -> dict[str, int | None]:
+    base = (
+        madgraph_seed
+        if madgraph_seed and 1 <= madgraph_seed <= 899_999_997
+        else secrets.randbelow(899_999_997) + 1
+    )
     return {
         "madgraph": madgraph_seed,
-        "pythia": base_seed + 1,
-        "delphes": base_seed + 2,
+        "pythia": base + 1,
+        "delphes": base + 2,
     }
 
 
-def validate_edm4hep_output(
+def validate_output(
     root_file: Path,
     podio_dump: str,
     log_file: Path,
     environment: dict[str, str],
 ) -> int:
-    if (
-        not root_file.is_file()
-        or root_file.stat().st_size == 0
-    ):
-        raise RuntimeError(
-            f"The EDM4hep output is missing or empty: {root_file}"
-        )
+    if not root_file.is_file() or root_file.stat().st_size == 0:
+        raise RuntimeError(f"EDM4hep output is missing or empty: {root_file}")
 
     result = subprocess.run(
         [podio_dump, str(root_file)],
@@ -687,151 +369,32 @@ def validate_edm4hep_output(
         stderr=subprocess.STDOUT,
         text=True,
     )
-
-    log_file.write_text(
-        result.stdout,
-        encoding="utf-8",
-    )
-
+    log_file.write_text(result.stdout, encoding="utf-8")
     if result.returncode != 0:
-        raise RuntimeError(
-            f"podio-dump could not read the output. See: {log_file}"
-        )
+        raise RuntimeError(f"podio-dump failed. See: {log_file}")
 
-    return parse_podio_event_count(result.stdout)
+    events = parse_podio_event_count(result.stdout)
+    if events < 1:
+        raise RuntimeError("The EDM4hep output contains no events.")
+    return events
 
 
-def preserve_madgraph_metadata(
-    process_directory: Path,
-    lhe_source: Path,
-    log_directory: Path,
+def copy_madgraph_cards(
+    process_dir: Path,
+    run_dir: Path,
+    log_dir: Path,
 ) -> None:
-    cards_to_copy = [
-        (
-            process_directory
-            / "Cards"
-            / "run_card.dat",
-            "run_card.dat",
-        ),
-        (
-            process_directory
-            / "Cards"
-            / "param_card.dat",
-            "param_card.dat",
-        ),
-    ]
-
-    for source, name in cards_to_copy:
+    for name in ("run_card.dat", "param_card.dat"):
+        source = process_dir / "Cards" / name
         if source.is_file():
-            shutil.copy2(source, log_directory / name)
-
-    for banner in lhe_source.parent.glob("*banner.txt"):
-        shutil.copy2(
-            banner,
-            log_directory / banner.name,
-        )
+            shutil.copy2(source, log_dir / name)
+    for banner in run_dir.glob("*banner.txt"):
+        shutil.copy2(banner, log_dir / banner.name)
 
 
-def save_lhe_output(
-    lhe_file: Path,
-    output_file: Path,
-) -> None:
-    output_file.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temporary_file = output_file.with_name(
-        f".{output_file.name}.tmp"
-    )
-
-    with lhe_file.open("rb") as source:
-        with gzip.open(
-            temporary_file,
-            "wb",
-        ) as destination:
-            shutil.copyfileobj(
-                source,
-                destination,
-            )
-
-    os.replace(temporary_file, output_file)
-
-
-def build_metadata(
-    run_id: str,
-    cards: dict[str, Path],
-    executables: dict[str, str],
-    madgraph_information: dict[str, Any],
-    lhe_information: dict[str, Any],
-    output_events: int,
-    pdf_information: dict[str, Any] | None,
-    seeds: dict[str, int | None],
-    root_file: Path,
-    log_directory: Path,
-) -> dict[str, Any]:
-    return {
-        "run_id": run_id,
-        "created_utc": datetime.now(
-            timezone.utc
-        ).isoformat(),
-        "sample": madgraph_information["sample_name"],
-        "madgraph": {
-            "card": str(cards["madgraph"]),
-            "output_directory": madgraph_information[
-                "output_directory"
-            ],
-            "requested_events": madgraph_information["nevents"],
-            "beam1_energy_gev": madgraph_information["ebeam1"],
-            "beam2_energy_gev": madgraph_information["ebeam2"],
-            "matching": matching_description(
-                madgraph_information
-            ),
-        },
-        "lhe": lhe_information,
-        "edm4hep": {
-            "events": output_events,
-            "file": str(root_file),
-        },
-        "pdf": pdf_information,
-        "seeds": seeds,
-        "cards": {
-            name: str(path)
-            for name, path in cards.items()
-        },
-        "executables": executables,
-        "logs": str(log_directory),
-    }
-
-
-def create_run_id() -> str:
-    return (
-        datetime.now(timezone.utc).strftime(
-            "%Y%m%d_%H%M%S"
-        )
-        + f"_{os.getpid()}"
-    )
-
-
-def remove_process_directory(
-    process_directory: Path,
-    config_directory: Path,
-) -> None:
-    resolved_process = process_directory.resolve()
-    resolved_config = config_directory.resolve()
-
-    try:
-        relative_path = resolved_process.relative_to(
-            resolved_config
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            f"Refusing to remove unsafe path: {resolved_process}"
-        ) from error
-
-    if not relative_path.parts:
-        raise RuntimeError(
-            f"Refusing to remove unsafe path: {resolved_process}"
-        )
-
-    shutil.rmtree(resolved_process)
+def save_lhe(source: Path, destination: Path) -> None:
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    with source.open("rb") as input_file:
+        with gzip.open(temporary, "wb") as output_file:
+            shutil.copyfileobj(input_file, output_file)
+    os.replace(temporary, destination)
