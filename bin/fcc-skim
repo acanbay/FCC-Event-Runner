@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+
+# Author: Ali Can Canbay <acanbay@ankara.edu.tr>
+
+"""Apply YAML-defined preselections to an EDM4hep sample."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+KEY4HEP_SETUP = Path(
+    os.environ.get(
+        "FCC_KEY4HEP_SETUP",
+        "/cvmfs/sw.hsf.org/key4hep/setup.sh",
+    )
+)
+
+
+def load_key4hep_if_needed() -> None:
+    if shutil.which("fccanalysis"):
+        return
+
+    if os.environ.get("FCC_EVENT_RUNNER_BOOTSTRAPPED") == "1":
+        raise RuntimeError(
+            "Key4hep was loaded, but fccanalysis is unavailable."
+        )
+    if not KEY4HEP_SETUP.is_file():
+        raise RuntimeError(
+            f"Key4hep setup was not found: {KEY4HEP_SETUP}"
+        )
+
+    os.environ["FCC_EVENT_RUNNER_BOOTSTRAPPED"] = "1"
+    os.execv(
+        "/bin/bash",
+        [
+            "bash",
+            "-c",
+            (
+                'setup_file="$1"; shift; '
+                'launcher="$1"; shift; '
+                'launcher_args=("$@"); '
+                "set --; set +u; "
+                'source "$setup_file"; '
+                'exec python3 "$launcher" "${launcher_args[@]}"'
+            ),
+            "fcc-skim",
+            str(KEY4HEP_SETUP),
+            str(Path(__file__).resolve()),
+            *sys.argv[1:],
+        ],
+    )
+
+
+def arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Apply object definitions and preselections to EDM4hep input."
+        )
+    )
+    parser.add_argument("input", type=Path, help="Input EDM4hep ROOT file.")
+    parser.add_argument("output", type=Path, help="Output flat ROOT file.")
+    parser.add_argument("config", type=Path, help="Skim YAML file.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and summarize the skim without running it.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing output after a successful skim.",
+    )
+    return parser.parse_args()
+
+
+def print_summary(input_file: Path, output_file: Path, config) -> None:
+    print(
+        "======================================================================\n"
+        " FCC Event Runner\n"
+        " EDM4hep -> FCCAnalyses preselection -> flat ROOT\n\n"
+        " Ali Can Canbay <acanbay@ankara.edu.tr>\n"
+        "======================================================================\n"
+    )
+    print("Skim summary")
+    print("------------")
+    print(f"Input          : {input_file}")
+    print(f"Output         : {output_file}")
+    print(f"Configuration  : {config.path}")
+    print(f"Jet collection : {config.jet.collection}")
+    print(f"Electron       : {config.electron.collection}")
+    print(f"Muon           : {config.muon.collection}")
+    print(f"MET            : {config.met.collection}")
+    print("Preselections  :")
+    for selection in config.selections:
+        print(f"  - {selection.source}")
+    print()
+
+
+def main() -> int:
+    values = arguments()
+
+    load_key4hep_if_needed()
+    sys.path.insert(0, str(PROJECT_DIR / "skimmer"))
+    from config import load_config  # pylint: disable=import-outside-toplevel
+
+    input_file = values.input.expanduser().resolve()
+    output_file = values.output.expanduser().resolve()
+    config_file = values.config.expanduser().resolve()
+    config = load_config(config_file)
+
+    if not input_file.is_file():
+        raise RuntimeError(f"Input file was not found: {input_file}")
+    if input_file == output_file:
+        raise RuntimeError("Input and output files must be different.")
+    if output_file.exists() and not values.overwrite:
+        raise RuntimeError(
+            f"Output already exists: {output_file}\n"
+            "Use --overwrite to replace it."
+        )
+
+    print_summary(input_file, output_file, config)
+    if values.dry_run:
+        print("Dry run completed. No files were generated.")
+        return 0
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output_file.with_name(
+        f".{output_file.stem}.partial-{os.getpid()}{output_file.suffix}"
+    )
+    temporary_output.unlink(missing_ok=True)
+
+    command = [
+        "fccanalysis",
+        "run",
+        "--use-data-source",
+        "--input",
+        str(input_file),
+        "--output",
+        str(temporary_output),
+        str(PROJECT_DIR / "skimmer" / "analysis.py"),
+        "--",
+        "--config",
+        str(config_file),
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+        if not temporary_output.is_file() or temporary_output.stat().st_size == 0:
+            raise RuntimeError(
+                "FCCAnalyses completed without producing a valid ROOT file."
+            )
+        temporary_output.replace(output_file)
+    except Exception:
+        temporary_output.unlink(missing_ok=True)
+        raise
+
+    print("\nSkim completed successfully.")
+    print(f"Output : {output_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\nSkim cancelled.", file=sys.stderr)
+        raise SystemExit(130)
+    except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f"\nERROR: {error}", file=sys.stderr)
+        raise SystemExit(1)

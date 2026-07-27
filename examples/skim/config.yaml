@@ -1,0 +1,34 @@
+objects:
+  jet:
+    collection: Jet
+    pt_min: 30
+    abs_eta_max: 6.0
+    central_abs_eta_max: 2.5
+    forward_abs_eta_min: 2.5
+    forward_abs_eta_max: 6.0
+    btag:
+      collection: Jet_HF_tags
+      bit: 0
+
+  electron:
+    collection: Electron
+    pt_min: 25
+    abs_eta_max: 4.0
+
+  muon:
+    collection: Muon
+    pt_min: 25
+    abs_eta_max: 4.0
+
+  MET:
+    collection: MissingET
+
+preselections: |
+  jet_size >= 2
+  bjet_size >= 1
+  fjet_size >= 1
+  lepton_size == 2
+  SS
+  MET > 30
+  mll > 20
+  mll_window 81 101 veto
