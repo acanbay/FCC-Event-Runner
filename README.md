@@ -1,158 +1,52 @@
 # FCC Event Runner
 
-FCC Event Runner executes:
+FCC Event Runner provides two independent command-line workflows:
 
 ```text
-MadGraph5 -> LHE -> Pythia8 -> Delphes -> EDM4hep ROOT
+fcc-run  : MadGraph5 -> LHE -> Pythia8 -> Delphes -> EDM4hep ROOT
+fcc-skim : EDM4hep ROOT -> FCCAnalyses preselections -> flat ROOT
 ```
 
-It also provides a separate skim command:
+The project uses native MadGraph, Pythia and Delphes cards for event
+generation and a separate YAML configuration for skimming. It does not require
+installation as a Python package.
+
+## Requirements
+
+FCC Event Runner requires a working Key4hep environment. If the required
+commands are already available in `PATH`, the active environment is used
+without modification.
+
+Otherwise, FCC Event Runner sources the setup file specified by
+`FCC_KEY4HEP_SETUP`. When the variable is not set, the default is:
 
 ```text
-EDM4hep ROOT -> FCCAnalyses preselection -> flat ROOT
+/cvmfs/sw.hsf.org/key4hep/setup.sh
 ```
 
-It uses the software already provided by a loaded Key4hep environment. No
-installation or Python package is required.
+The default works on systems that expose the CERN CVMFS repositories. On other
+systems, set `FCC_KEY4HEP_SETUP` to the available Key4hep setup file. FCC Event
+Runner does not install Key4hep or provide access to external software
+repositories.
 
-## Quick start
+| Command | Required executables |
+|---|---|
+| `fcc-run` | `mg5_aMC`, `DelphesPythia8_EDM4HEP`, `podio-dump`, `lhapdf`, `lhapdf-config` |
+| `fcc-skim` | `fccanalysis` |
 
-Run the complete ttbar example:
+## Event generation
+
+Run the included production without jet matching:
 
 ```bash
 ./bin/fcc-run examples/ttbar/config.yaml
 ```
 
-If the Key4hep commands are not already available, `fcc-run` loads
-`/cvmfs/sw.hsf.org/key4hep/setup.sh` automatically. CVMFS must be mounted, but
-the user does not need to source Key4hep manually.
-
-Run with a persistent writable LHAPDF cache:
+Run the included kT-MLM matching example:
 
 ```bash
-./bin/fcc-run \
-  --lhapdf-dir "$HOME/softwares/lhapdf_data" \
-  examples/ttbar/config.yaml
+./bin/fcc-run examples/wjets/config.yaml
 ```
-
-The runner installs the PDF requested by the MadGraph card when it is missing,
-then runs the complete production chain.
-
-## Skimming
-
-Apply object definitions and preselections to an EDM4hep sample:
-
-```bash
-./bin/fcc-skim \
-  input.root \
-  output.root \
-  examples/skim/config.yaml
-```
-
-`fcc-skim` loads Key4hep automatically when `fccanalysis` is not already
-available. CVMFS must already be mounted; the command does not mount software
-repositories. The existing `fcc-run` production workflow is not involved.
-
-Inspect and validate a skim configuration without producing an output:
-
-```bash
-./bin/fcc-skim \
-  --dry-run \
-  input.root \
-  output.root \
-  examples/skim/config.yaml
-```
-
-Replace an existing output:
-
-```bash
-./bin/fcc-skim \
-  --overwrite \
-  input.root \
-  output.root \
-  examples/skim/config.yaml
-```
-
-`fcc-skim` runs FCCAnalyses in a single thread for stable podio DataSource
-processing.
-
-The output is a compact flat ROOT analysis ntuple, not another EDM4hep file.
-It contains selected object kinematics, object multiplicities, missing
-transverse momentum, dilepton mass, dilepton charge product and event weight.
-
-### Skim configuration
-
-Object definitions are kept separate from event preselections:
-
-```yaml
-objects:
-  jet:
-    collection: Jet
-    pt_min: 30
-    abs_eta_max: 6.0
-    central_abs_eta_max: 2.5
-    forward_abs_eta_min: 2.5
-    forward_abs_eta_max: 6.0
-    btag:
-      collection: Jet_HF_tags
-      bit: 0
-
-  electron:
-    collection: Electron
-    pt_min: 25
-    abs_eta_max: 4.0
-
-  muon:
-    collection: Muon
-    pt_min: 25
-    abs_eta_max: 4.0
-
-  MET:
-    collection: MissingET
-
-preselections: |
-  jet_size >= 2
-  bjet_size >= 1
-  fjet_size >= 1
-  lepton_size == 2
-  SS
-  MET > 30
-  mll > 20
-  mll_window 81 101 veto
-```
-
-The following multiplicities are available:
-
-```text
-jet_size
-central_jet_size
-bjet_size
-fjet_size
-electron_size
-muon_size
-lepton_size
-```
-
-Every preselection line is optional. Supported kinematic variables are `MET`
-and `mll`. Dilepton charge can be selected with `SS` or `OS`.
-
-An invariant-mass window has the form:
-
-```text
-mll_window LOW HIGH veto
-mll_window LOW HIGH include
-```
-
-`SS`, `OS`, `mll` and `mll_window` require `lepton_size == 2`, preventing an
-ambiguous dilepton choice.
-
-The heavy-flavour tag is read from the configured `ParticleID` collection.
-For the current `FCChh_II.tcl` card, b-tag bits 0, 1 and 2 correspond to the
-loose, medium and tight working points. The desired bit remains an explicit
-analysis choice in the YAML file. B-tagged jets are always restricted to the
-configured central-jet acceptance.
-
-## Production files
 
 Each production uses:
 
@@ -165,117 +59,87 @@ sample_pythia.cmd
 The YAML file only connects the native cards:
 
 ```yaml
-madgraph_card: ttbar.mg5
-pythia_card: ttbar_pythia.cmd
+madgraph_card: sample.mg5
+pythia_card: sample_pythia.cmd
 delphes_card: ${DELPHES_DIR}/cards/FCC/scenarios/FCChh_II.tcl
 edm4hep_card: ${K4SIMDELPHES}/edm4hep_output_config.tcl
 ```
 
-Event count, beams, PDF, seed, model, process, cuts, matching settings and the
-output name remain in the MadGraph card.
+The MadGraph card owns the process, model, beams, event count, seed, PDF,
+matching parameters and output name. The Pythia card owns showering,
+hadronization and matching settings. `fcc-run` additionally provides:
 
-The basename of the MadGraph output directory becomes the sample name:
+- Writable LHAPDF caching and installation of a missing requested set
+- Dry-run and PDF-only preparation modes
+- Optional interactive confirmation
+- Safe replacement of an existing validated output
+- Optional retention of LHE and MadGraph work data
+- EDM4hep validation, production logs and JSON metadata
 
-```text
-output work/ttbar
-```
+See the complete [event-generation guide](docs/event-generation.md) for the
+card contract, all command options and output contents.
 
-produces:
+## Skimming
 
-```text
-outputs/ttbar.root
-outputs/ttbar.metadata.json
-```
-
-The Pythia card may use:
-
-```text
-@LHE_FILE@
-@LHE_EVENTS@
-@PYTHIA_SEED@
-```
-
-These fields are filled automatically from the generated sample.
-
-## Useful options
-
-Inspect the resolved production:
+Apply the included skim configuration:
 
 ```bash
-./bin/fcc-run --dry-run examples/ttbar/config.yaml
+./bin/fcc-skim \
+  input.root \
+  output.root \
+  examples/skim/config.yaml
 ```
 
-Install a missing PDF without generating events:
+The skim YAML defines:
 
-```bash
-./bin/fcc-run --prepare examples/ttbar/config.yaml
-```
+- Jet, electron, muon and missing-momentum collections
+- Object transverse-momentum and pseudorapidity requirements
+- Central, forward and b-tagged jet definitions
+- Multiplicity, missing-momentum and dilepton-mass preselections
+- Same-sign or opposite-sign dilepton charge
+- Included or vetoed dilepton-mass windows
 
-Require confirmation:
+`fcc-skim` validates the configuration, runs FCCAnalyses with the podio
+DataSource and writes a flat ROOT ntuple containing event weight, object
+multiplicities and selected-object kinematics. It supports dry-run inspection
+and safe replacement of an existing output. FCCAnalyses runs in one thread.
 
-```bash
-./bin/fcc-run --confirm examples/ttbar/config.yaml
-```
+See the complete [skimming guide](docs/skimming.md) for the YAML contract,
+preselection syntax, command options and output branches.
 
-Replace an existing output only after the new output validates:
+## Documentation
 
-```bash
-./bin/fcc-run --overwrite examples/ttbar/config.yaml
-```
+| Guide | Contents |
+|---|---|
+| [Event generation](docs/event-generation.md) | MadGraph and Pythia cards, LHAPDF handling, options, validation and outputs |
+| [Skimming](docs/skimming.md) | Object definitions, preselection language, options and flat ROOT output |
 
-Keep optional intermediate data:
+## Included examples
 
-```bash
-./bin/fcc-run --keep-lhe --keep-work examples/ttbar/config.yaml
-```
+| Directory | Purpose |
+|---|---|
+| [`examples/ttbar`](examples/ttbar) | Event generation without jet matching |
+| [`examples/wjets`](examples/wjets) | Event generation with kT-MLM matching |
+| [`examples/skim`](examples/skim) | Object definitions and same-sign dilepton preselections |
 
-## Outputs
+Example matching scales demonstrate the configuration mechanism and must be
+validated for a specific production.
 
-Every successful production contains:
+## External execution
 
-- An EDM4hep ROOT file
-- JSON metadata with event counts, cross section, beam energies, PDF, seeds,
-  matching mode, cards and executable paths
-- MadGraph, Pythia/Delphes and validation logs
-- The generated MadGraph run card, parameter card and banner
-
-Failed MadGraph directories are preserved. Successful MadGraph directories are
-removed unless `--keep-work` is used. The generated LHE file is only retained
-when `--keep-lhe` is used.
-
-The EDM4hep event count must be positive but is not required to equal the
-requested MadGraph count. Matching or filtering may reduce it.
-
-## Examples
-
-`examples/ttbar` demonstrates production without jet matching.
-
-`examples/wjets` demonstrates kT-MLM matching with matrix-element samples
-containing zero, one and two light partons. Its matching-scale values are
-examples and must be validated before a large production.
-
-## Required commands
-
-The loaded environment must provide:
-
-```text
-mg5_aMC
-DelphesPythia8_EDM4HEP
-podio-dump
-lhapdf
-lhapdf-config
-fccanalysis
-```
-
-## Batch systems
-
-The runner contains no batch-system or software-mounting logic. An external
-job wrapper prepares the environment and calls:
+FCC Event Runner contains no batch-system or software-mounting logic. An
+external wrapper may prepare the software environment and call either command:
 
 ```bash
 /path/to/FCC-Event-Runner/bin/fcc-run config.yaml
 /path/to/FCC-Event-Runner/bin/fcc-skim input.root output.root skim.yaml
 ```
+
+## Author
+
+Ali Can Canbay
+Ankara University
+acanbay@ankara.edu.tr
 
 ## References
 
