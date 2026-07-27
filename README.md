@@ -135,12 +135,6 @@ external wrapper may prepare the software environment and call either command:
 /path/to/FCC-Event-Runner/bin/fcc-skim input.root output.root skim.yaml
 ```
 
-## Author
-
-Ali Can Canbay
-Ankara University
-acanbay@ankara.edu.tr
-
 ## References
 
 - [FCC Software](https://hep-fcc.github.io/FCCSW/)
