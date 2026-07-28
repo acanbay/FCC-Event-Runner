@@ -170,6 +170,26 @@ def parse_lhe(path: Path) -> dict[str, Any]:
     return result
 
 
+def parse_pythia_cross_section(path: Path) -> dict[str, float | None]:
+    """Read the post-shower cross section reported by Pythia8."""
+    pattern = re.compile(
+        r"Pythia8 Cross-section\s*\(.*?\):\s*"
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)\s*"
+        r"\+/-\s*"
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)\s*pb"
+    )
+    match = pattern.search(path.read_text(encoding="utf-8", errors="replace"))
+    if match is None:
+        return {
+            "cross_section_pb": None,
+            "cross_section_error_pb": None,
+        }
+    return {
+        "cross_section_pb": float(match.group(1)),
+        "cross_section_error_pb": float(match.group(2)),
+    }
+
+
 def parse_podio_event_count(output: str) -> int:
     match = re.search(r"(?m)^\s*events\s+(\d+)\s*$", output)
     if match is None:

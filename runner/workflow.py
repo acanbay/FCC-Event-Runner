@@ -21,6 +21,7 @@ from parsers import (
     parse_lhe,
     parse_madgraph_card,
     parse_podio_event_count,
+    parse_pythia_cross_section,
     render_template,
 )
 
@@ -144,6 +145,7 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
         )
 
         print("\n[2/3] Running Pythia8 and Delphes...")
+        pythia_log = log_dir / "pythia_delphes.log"
         run_command(
             [
                 commands["DelphesPythia8_EDM4HEP"],
@@ -152,10 +154,11 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
                 str(pythia_runtime),
                 str(temporary_root),
             ],
-            log_dir / "pythia_delphes.log",
+            pythia_log,
             base,
             environment,
         )
+        pythia = parse_pythia_cross_section(pythia_log)
 
         print("\n[3/3] Validating the EDM4hep output...")
         output_events = validate_output(
@@ -169,14 +172,56 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
         if options.keep_lhe:
             save_lhe(lhe_file, lhe_output)
 
+        matching_enabled = bool(mg["ickkw"])
+        if matching_enabled and pythia["cross_section_pb"] is None:
+            raise RuntimeError(
+                "Pythia8 did not report a post-matching cross section."
+            )
+        use_pythia_cross_section = (
+            matching_enabled
+            and pythia["cross_section_pb"] is not None
+        )
+        cross_section_pb = (
+            pythia["cross_section_pb"]
+            if use_pythia_cross_section
+            else lhe["cross_section_pb"]
+        )
+        cross_section_error_pb = (
+            pythia["cross_section_error_pb"]
+            if use_pythia_cross_section
+            else lhe["cross_section_error_pb"]
+        )
+        matching_efficiency = None
+        if (
+            matching_enabled
+            and pythia["cross_section_pb"] is not None
+            and lhe["cross_section_pb"]
+        ):
+            matching_efficiency = (
+                pythia["cross_section_pb"] / lhe["cross_section_pb"]
+            )
+
         metadata = {
+            "metadata_schema": 2,
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "sample": mg["sample_name"],
             "requested_events": mg["nevents"],
             "lhe_events": lhe["events"],
             "edm4hep_events": output_events,
-            "cross_section_pb": lhe["cross_section_pb"],
-            "cross_section_error_pb": lhe["cross_section_error_pb"],
+            "cross_section_pb": cross_section_pb,
+            "cross_section_error_pb": cross_section_error_pb,
+            "cross_section_source": (
+                "pythia_after_matching"
+                if use_pythia_cross_section
+                else "lhe"
+            ),
+            "lhe_cross_section_pb": lhe["cross_section_pb"],
+            "lhe_cross_section_error_pb": lhe["cross_section_error_pb"],
+            "pythia_cross_section_pb": pythia["cross_section_pb"],
+            "pythia_cross_section_error_pb": (
+                pythia["cross_section_error_pb"]
+            ),
+            "matching_efficiency": matching_efficiency,
             "beam1_energy_gev": mg["ebeam1"],
             "beam2_energy_gev": mg["ebeam2"],
             "lhaid": mg["lhaid"],

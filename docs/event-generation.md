@@ -120,8 +120,12 @@ The EDM4hep output is validated with `podio-dump` and must contain at least one
 event. Its event count may differ from the requested MadGraph count after
 matching or filtering. The file is moved into place only after validation.
 
-The metadata JSON records event counts, cross section and uncertainty, beam
-energies, LHAPDF ID, matching mode, seeds, cards and executable paths. Logs
+The metadata JSON records event counts, cross sections and uncertainties, beam
+energies, LHAPDF ID, matching mode, seeds, cards and executable paths. For an
+MLM/FxFx sample, `cross_section_pb` is the post-matching cross section reported
+by Pythia8. For an unmatched sample it is the LHE cross section. The explicit
+`lhe_cross_section_pb`, `pythia_cross_section_pb`, `cross_section_source` and
+`matching_efficiency` fields preserve the full normalization provenance. Logs
 contain the MadGraph, Pythia/Delphes and validation output together with the
 resolved run card, parameter card and banner.
 
