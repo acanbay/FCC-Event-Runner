@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from delphes_output import (
+    OutputSelection,
+    create_output_selection,
+    parse_treewriter,
+)
 from lhapdf import prepare_lhapdf
 from parsers import (
     load_manifest,
@@ -24,6 +29,9 @@ from parsers import (
     parse_pythia_cross_section,
     render_template,
 )
+
+
+DEFAULT_EDM4HEP_CARD = "${K4SIMDELPHES}/edm4hep_output_config.tcl"
 
 
 @dataclass(frozen=True)
@@ -47,8 +55,20 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
     manifest = load_manifest(config_file)
     cards = {
         name: resolve_card(manifest[f"{name}_card"], base)
-        for name in ("madgraph", "pythia", "delphes", "edm4hep")
+        for name in ("madgraph", "pythia", "delphes")
     }
+    output_selection: OutputSelection | None = None
+    if "edm4hep_output" in manifest:
+        treewriter = parse_treewriter(cards["delphes"])
+        output_selection = create_output_selection(
+            treewriter,
+            manifest["edm4hep_output"]["collections"],
+        )
+    else:
+        cards["edm4hep"] = resolve_card(
+            manifest.get("edm4hep_card", DEFAULT_EDM4HEP_CARD),
+            base,
+        )
     mg = parse_madgraph_card(cards["madgraph"])
 
     process_dir = (base / mg["output_directory"]).resolve()
@@ -71,7 +91,7 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
         environment,
         install=False,
     )
-    print_summary(cards, mg, pdf, root_file)
+    print_summary(cards, output_selection, mg, pdf, root_file)
 
     if options.dry_run:
         print("\nDry run completed. No files were generated.")
@@ -109,6 +129,12 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
     shutil.copy2(config_file, log_dir / "config.yaml")
     for name in ("madgraph", "pythia"):
         shutil.copy2(cards[name], log_dir / cards[name].name)
+    if output_selection is not None:
+        cards["edm4hep"] = log_dir / "edm4hep_output_runtime.tcl"
+        cards["edm4hep"].write_text(
+            output_selection.card_text,
+            encoding="utf-8",
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     temporary_root = output_dir / f".{mg['sample_name']}.{run_id}.root"
@@ -228,6 +254,14 @@ def run_fcc_workflow(options: WorkflowOptions) -> int:
             "matching": matching_description(mg),
             "seeds": seeds,
             "cards": {name: str(path) for name, path in cards.items()},
+            "edm4hep_output_mode": (
+                "generated" if output_selection is not None else "card"
+            ),
+            "selected_delphes_branches": (
+                [branch.name for branch in output_selection.selected]
+                if output_selection is not None
+                else None
+            ),
             "executables": commands,
         }
 
@@ -297,6 +331,7 @@ def add_yaml_cpp_runtime(environment: dict[str, str]) -> None:
 
 def print_summary(
     cards: dict[str, Path],
+    output_selection: OutputSelection | None,
     mg: dict[str, Any],
     pdf: dict[str, Any] | None,
     root_file: Path,
@@ -313,6 +348,15 @@ def print_summary(
         ("MadGraph card", cards["madgraph"]),
         ("Pythia card", cards["pythia"]),
         ("Delphes card", cards["delphes"]),
+        (
+            "EDM4hep output",
+            cards["edm4hep"]
+            if output_selection is None
+            else (
+                f"Generated from {len(output_selection.selected)}/"
+                f"{len(output_selection.available)} TreeWriter branches"
+            ),
+        ),
         ("MG5 output", mg["output_directory"]),
         ("Events", mg["nevents"]),
         ("Beam energies", f"{mg['ebeam1']} + {mg['ebeam2']} GeV"),
@@ -326,6 +370,16 @@ def print_summary(
     print("-" * (width + 2))
     for label, value in rows:
         print(f"{label:<{width}} : {value}")
+    if output_selection is not None:
+        names = ", ".join(
+            branch.name for branch in output_selection.selected
+        )
+        print(
+            f"{'Collections':<{width}} : "
+            f"{names if names else 'EventHeader only'}"
+        )
+        for warning in output_selection.warnings:
+            print(f"{'Warning':<{width}} : {warning}")
 
 
 def run_command(

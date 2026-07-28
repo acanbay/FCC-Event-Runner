@@ -1,0 +1,25 @@
+import model sm
+
+generate p p > t t~
+
+output work/ttbar
+launch work/ttbar
+
+shower=OFF
+detector=OFF
+analysis=OFF
+madspin=OFF
+reweight=OFF
+
+done
+
+set nevents 100
+set iseed 12345
+
+set ebeam1 50000
+set ebeam2 50000
+
+set pdlabel lhapdf
+set lhaid 263000
+
+done

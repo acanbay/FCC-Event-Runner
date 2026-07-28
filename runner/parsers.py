@@ -14,24 +14,69 @@ except ImportError as error:
     raise RuntimeError("PyYAML is not available in the loaded environment.") from error
 
 
-REQUIRED_CONFIG_FIELDS = (
+REQUIRED_CARD_FIELDS = (
     "madgraph_card",
     "pythia_card",
     "delphes_card",
-    "edm4hep_card",
 )
 
 
-def load_manifest(path: Path) -> dict[str, str]:
+def load_manifest(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise RuntimeError("The YAML root must be a mapping.")
 
-    missing = [field for field in REQUIRED_CONFIG_FIELDS if field not in data]
+    missing = [field for field in REQUIRED_CARD_FIELDS if field not in data]
     if missing:
         raise RuntimeError(f"Missing YAML field(s): {', '.join(missing)}")
 
-    return {field: str(data[field]) for field in REQUIRED_CONFIG_FIELDS}
+    output_fields = [
+        field
+        for field in ("edm4hep_card", "edm4hep_output")
+        if field in data
+    ]
+    if len(output_fields) > 1:
+        raise RuntimeError(
+            "Define only one of 'edm4hep_card' or 'edm4hep_output'."
+        )
+
+    manifest: dict[str, Any] = {
+        field: str(data[field])
+        for field in REQUIRED_CARD_FIELDS
+    }
+    if not output_fields:
+        return manifest
+    if "edm4hep_card" in data:
+        manifest["edm4hep_card"] = str(data["edm4hep_card"])
+        return manifest
+
+    output = data["edm4hep_output"]
+    if not isinstance(output, dict):
+        raise RuntimeError("'edm4hep_output' must be a mapping.")
+    unknown = sorted(set(output) - {"collections"})
+    if unknown:
+        raise RuntimeError(
+            "Unknown edm4hep_output field(s): " + ", ".join(unknown)
+        )
+
+    collections = output.get("collections")
+    if not isinstance(collections, list):
+        raise RuntimeError(
+            "'edm4hep_output.collections' must be a list."
+        )
+    if not all(isinstance(name, str) and name.strip() for name in collections):
+        raise RuntimeError(
+            "Every edm4hep_output collection must be a non-empty string."
+        )
+    if len(collections) != len(set(collections)):
+        raise RuntimeError(
+            "'edm4hep_output.collections' contains duplicate names."
+        )
+
+    manifest["edm4hep_output"] = {
+        "collections": collections,
+    }
+    return manifest
 
 
 def parse_madgraph_card(path: Path) -> dict[str, Any]:

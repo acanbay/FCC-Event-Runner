@@ -1,0 +1,13 @@
+madgraph_card: ttbar.mg5
+pythia_card: ttbar_pythia.cmd
+delphes_card: ${DELPHES_DIR}/cards/FCC/scenarios/FCChh_II.tcl
+
+edm4hep_output:
+  collections:
+    - EFlowTrack
+    - EFlowPhoton
+    - EFlowNeutralHadron
+    - Electron
+    - Muon
+    - Jet
+    - MissingET
